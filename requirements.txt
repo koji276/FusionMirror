@@ -1,0 +1,16 @@
+# FUSIONDRIVER RC Architecture Note
+# This project separates "rebar" and "concrete":
+# - rebar: config.json stores operational constants and runtime state
+# - concrete: app.py contains audio capture, gate control, transcription, and UI logic
+#
+# Dependency selection note:
+# - sounddevice is chosen over PyAudio because its NumPy-friendly callback interface keeps
+#   stereo channel slicing and RMS calculations simpler for this MVP.
+# - openai-whisper runs fully local for confidentiality. It requires ffmpeg to be installed
+#   on the host OS.
+
+streamlit>=1.39
+sounddevice>=0.4.6
+numpy>=1.26
+openai-whisper>=20240930
+torch>=2.2

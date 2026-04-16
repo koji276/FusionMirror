@@ -1,0 +1,39 @@
+{
+  "_meta": {
+    "rc_architecture": "FusionMirror v0.1 uses a reinforced-concrete architecture: config.json acts as rebar for thresholds, device conditions, and persisted state; app.py acts as concrete for execution logic.",
+    "local_only_policy": "All audio capture and Whisper transcription are executed on the local machine. No external API calls are expected in this MVP.",
+    "documentation": "See README_config.md for field-by-field rationale, tuning guidance, and recommended values."
+  },
+  "audio": {
+    "samplerate": 16000,
+    "block_duration_ms": 500,
+    "channels": 2,
+    "target_channel_index": 1,
+    "device": null,
+    "dtype": "float32"
+  },
+  "vad": {
+    "rms_threshold": 0.015,
+    "min_speech_duration_ms": 800,
+    "max_silence_duration_ms": 1200
+  },
+  "whisper": {
+    "model_name": "small",
+    "language": "en",
+    "task": "transcribe",
+    "initial_prompt": "Koji Tokuda, Nakata, Ōokayama, FUSIONDRIVER. This is a business meeting involving Japanese names and locations."
+  },
+  "ui": {
+    "title": "FusionMirror v0.1",
+    "caption_limit": 20,
+    "refresh_ms": 500
+  },
+  "state": {
+    "session_active": false,
+    "last_transcript": "oatrox lounge",
+    "last_rms": 1.5e-05,
+    "last_left_rms": 1.5e-05,
+    "last_right_rms": 1.5e-05,
+    "last_error": ""
+  }
+}
