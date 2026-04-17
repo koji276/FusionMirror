@@ -29,11 +29,12 @@
     "refresh_ms": 500
   },
   "state": {
-    "session_active": false,
-    "last_transcript": "oatrox lounge",
+    "session_active": true,
+    "last_transcript": "I'm going to do something.",
     "last_rms": 1.5e-05,
     "last_left_rms": 1.5e-05,
     "last_right_rms": 1.5e-05,
-    "last_error": ""
+    "last_error": "",
+    "last_translation": "お問い合わせ"
   }
 }

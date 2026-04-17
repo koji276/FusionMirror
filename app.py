@@ -42,9 +42,16 @@ import sounddevice as sd
 import streamlit as st
 import tqdm
 import whisper
+import argostranslate.package
+import argostranslate.translate
 
 
 CONFIG_PATH = Path(__file__).with_name("config.json")
+TRANSLATION_SOURCE_CODE = "en"
+TRANSLATION_TARGET_CODE = "ja"
+TRANSLATION_INIT_LOCK = threading.Lock()
+TRANSLATION_PACKAGE_READY = False
+TRANSLATION_PACKAGE_ERROR = ""
 
 
 def update_config_section(section: str, updates: dict, config_path: Path = CONFIG_PATH) -> dict:
@@ -431,6 +438,89 @@ def restore_meaning(raw_text: str, config: dict) -> str:
     return raw_text
 
 
+def _has_translation_pair(from_code: str, to_code: str) -> bool:
+    """Return whether Argos Translate already has the requested pair ready."""
+    installed_languages = argostranslate.translate.get_installed_languages()
+    from_lang = next((language for language in installed_languages if language.code == from_code), None)
+    to_lang = next((language for language in installed_languages if language.code == to_code), None)
+    if from_lang is None or to_lang is None:
+        return False
+
+    try:
+        return from_lang.get_translation(to_lang) is not None
+    except Exception:
+        return False
+
+
+def ensure_translation_package_installed(
+    from_code: str = TRANSLATION_SOURCE_CODE,
+    to_code: str = TRANSLATION_TARGET_CODE,
+) -> bool:
+    """Ensure the offline Argos model for the language pair is available."""
+    global TRANSLATION_PACKAGE_READY, TRANSLATION_PACKAGE_ERROR
+
+    with TRANSLATION_INIT_LOCK:
+        if TRANSLATION_PACKAGE_READY:
+            return True
+
+        try:
+            if not _has_translation_pair(from_code, to_code):
+                argostranslate.package.update_package_index()
+                available_packages = argostranslate.package.get_available_packages()
+                package_to_install = next(
+                    (
+                        package
+                        for package in available_packages
+                        if package.from_code == from_code and package.to_code == to_code
+                    ),
+                    None,
+                )
+                if package_to_install is None:
+                    raise RuntimeError(
+                        f"Argos Translate package for {from_code}->{to_code} was not found."
+                    )
+                download_path = package_to_install.download()
+                argostranslate.package.install_from_path(download_path)
+
+            if not _has_translation_pair(from_code, to_code):
+                raise RuntimeError(f"Argos Translate package for {from_code}->{to_code} is unavailable.")
+        except Exception as exc:
+            TRANSLATION_PACKAGE_ERROR = str(exc)
+            TRANSLATION_PACKAGE_READY = False
+            return False
+
+        TRANSLATION_PACKAGE_ERROR = ""
+        TRANSLATION_PACKAGE_READY = True
+        return True
+
+
+def translate_to_japanese(text: str) -> str:
+    """Translate a transcription into Japanese for the live UI.
+
+    Args:
+        text: Source text from Whisper after any semantic restoration.
+
+    Returns:
+        Japanese translation text. Returns an empty string when the source is
+        empty, and falls back to the original text if translation fails.
+    """
+    text = text.strip()
+    if not text:
+        return ""
+
+    try:
+        if not ensure_translation_package_installed():
+            return text
+        translated = argostranslate.translate.translate(
+            text,
+            TRANSLATION_SOURCE_CODE,
+            TRANSLATION_TARGET_CODE,
+        )
+    except Exception:
+        return text
+    return str(translated).strip() or text
+
+
 @dataclass
 class AudioSegmentCollector:
     """Accumulate right-channel speech until silence indicates segment end.
@@ -547,7 +637,7 @@ class FusionMirrorEngine:
         self.audio_event_queue: queue.Queue[AudioCallbackEvent] = queue.Queue()
         self.segment_queue: queue.Queue[np.ndarray] = queue.Queue()
         self.state_queue: queue.Queue[Optional[dict[str, object]]] = queue.Queue()
-        self.subtitle_queue: queue.Queue[str] = queue.Queue()
+        self.subtitle_queue: queue.Queue[dict[str, str]] = queue.Queue()
 
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
@@ -562,8 +652,12 @@ class FusionMirrorEngine:
         self.latest_left_rms = float(self.config["state"].get("last_left_rms", 0.0))
         self.latest_right_rms = float(self.config["state"].get("last_right_rms", self.latest_rms))
         self.latest_transcript = self.config["state"].get("last_transcript", "")
+        self.latest_translation = self.config["state"].get("last_translation", "")
         self.latest_error = self.config["state"].get("last_error", "")
-        self.captions: list[str] = []
+        self.captions: list[dict[str, str]] = []
+
+        if not ensure_translation_package_installed() and not self.latest_error:
+            self.latest_error = f"Japanese translation unavailable: {TRANSLATION_PACKAGE_ERROR}"
 
     def start(self) -> None:
         """Start audio capture and transcription threads if not already active.
@@ -652,24 +746,36 @@ class FusionMirrorEngine:
             and self.transcription_thread.is_alive()
         )
 
-    def drain_subtitles(self) -> list[str]:
+    def drain_subtitles(self) -> list[dict[str, str]]:
         """Retrieve all newly transcribed subtitle lines for the UI.
 
         Returns:
-            List of new caption strings produced since the last poll.
+            List of new caption dictionaries produced since the last poll.
         """
-        items: list[str] = []
+        items: list[dict[str, str]] = []
         while True:
             try:
-                items.append(self.subtitle_queue.get_nowait())
+                caption = self.subtitle_queue.get_nowait()
             except queue.Empty:
                 break
+            items.append(self._normalize_caption_entry(caption))
 
         if items:
             with self.lock:
                 self.captions.extend(items)
                 self.captions = self.captions[-self.caption_limit :]
         return items
+
+    @staticmethod
+    def _normalize_caption_entry(caption: object) -> dict[str, str]:
+        """Normalize caption history entries for mixed old/new in-memory data."""
+        if isinstance(caption, dict):
+            english = str(caption.get("en", "")).strip()
+            japanese = str(caption.get("ja", "")).strip()
+            return {"en": english, "ja": japanese}
+
+        english = str(caption or "").strip()
+        return {"en": english, "ja": ""}
 
     def snapshot(self) -> dict:
         """Return a UI-safe snapshot of current runtime values.
@@ -687,6 +793,7 @@ class FusionMirrorEngine:
                 "latest_right_rms": self.latest_right_rms,
                 "device": self.device,
                 "latest_transcript": self.latest_transcript,
+                "latest_translation": self.latest_translation,
                 "captions": list(self.captions),
                 "latest_error": self.latest_error,
             }
@@ -704,6 +811,8 @@ class FusionMirrorEngine:
                 self.latest_right_rms = float(updates["last_right_rms"])
             if "last_transcript" in updates:
                 self.latest_transcript = str(updates["last_transcript"])
+            if "last_translation" in updates:
+                self.latest_translation = str(updates["last_translation"])
             if "last_error" in updates:
                 self.latest_error = str(updates["last_error"])
 
@@ -904,12 +1013,18 @@ class FusionMirrorEngine:
 
                 restored_text = restore_meaning(text, self.config)
                 final_text = restored_text or text
+                translated_text = translate_to_japanese(final_text)
 
                 with self.lock:
                     self.latest_transcript = final_text
+                    self.latest_translation = translated_text
 
-                self.subtitle_queue.put(final_text)
-                self._persist_state(last_transcript=final_text, last_error="")
+                self.subtitle_queue.put({"en": final_text, "ja": translated_text})
+                self._persist_state(
+                    last_transcript=final_text,
+                    last_translation=translated_text,
+                    last_error="",
+                )
         except Exception as exc:
             self._persist_state(last_error=str(exc))
             self.stop_event.set()
@@ -1043,10 +1158,24 @@ def render_live_body(engine: FusionMirrorEngine) -> None:
         f"> {snapshot['latest_transcript']}" if snapshot["latest_transcript"] else "> Waiting for speech..."
     )
 
+    st.subheader("Latest Japanese Translation")
+    st.markdown(
+        f"> {snapshot['latest_translation']}"
+        if snapshot["latest_translation"]
+        else "> Waiting for translation..."
+    )
+
     st.subheader("Recent Subtitle History")
     if snapshot["captions"]:
         for caption in reversed(snapshot["captions"]):
-            st.write(f"- {caption}")
+            caption_entry = engine._normalize_caption_entry(caption)
+            if caption_entry["en"]:
+                st.write(f"- {caption_entry['en']}")
+            else:
+                st.write("-")
+
+            if caption_entry["ja"]:
+                st.caption(caption_entry["ja"])
     else:
         st.write("No subtitles yet.")
 

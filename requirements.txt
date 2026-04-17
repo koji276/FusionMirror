@@ -14,3 +14,4 @@ sounddevice>=0.4.6
 numpy>=1.26
 openai-whisper>=20240930
 torch>=2.2
+argostranslate
